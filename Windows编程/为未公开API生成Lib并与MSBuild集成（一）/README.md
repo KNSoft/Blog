@@ -80,7 +80,7 @@ EXPORTS
 
 先祭出Microsoft Learn的祖传文档——[PE Format - Archive (Library) File Format - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#archive-library-file-format)。
 
-我已将踩过的坑对应的文档错漏提交给[Microsoft Docs](https://github.com/MicrosoftDocs)并得到合入，此外需要注意的本文会提及。与某些单纯复制或者翻译微软文档就拿来发的博客相比，算是实践出真知了。
+我已将踩过的坑对应的文档错漏提交给[Microsoft Docs](https://github.com/MicrosoftDocs)并得到合入([PR #1555](https://github.com/MicrosoftDocs/win32/pull/1555), [PR #1586](https://github.com/MicrosoftDocs/win32/pull/1586), [PR #1622](https://github.com/MicrosoftDocs/win32/pull/1622))，此外需要注意的本文会提及。与某些单纯复制或者翻译微软文档就拿来发的博客相比，算是实践出真知了。
 
 **Lib (Archive) 文件主要包含导入符号（Import Symbol），供链接器链接。这些符号可以指向外部Dll的导出，也可以存在于Lib自身夹带的Obj文件里。**
 
@@ -236,7 +236,7 @@ EXPORTS
 </table>
 
 + Archive Member Header (成员头)  
-    Lib文件中所有成员都以`IMAGE_ARCHIVE_MEMBER_HEADER`结构体开头，实际有用且需要的只有`Name`和`Size`字段，分别表示名称和大小。`Name`也用以指示为上表签名后的三个特殊成员，如果名称超过16字节（去除末尾固定的`'/'`只剩15字节），则名称字符串存放到 Longnames Member （长名称成员）里，`Name`字段指示其所在偏移。`Size`表示整个成员的大小，包含成员头自身大小60（`IMAGE_SIZEOF_ARCHIVE_MEMBER_HDR`或`sizeof(IMAGE_ARCHIVE_MEMBER_HEADER)`）字节和其后的成员数据大小，不包含用于对齐的`'\n'`。
+    Lib文件中所有成员都以`IMAGE_ARCHIVE_MEMBER_HEADER`结构体开头，实际有用且需要的只有`Name`和`Size`字段，分别表示名称和大小。`Name`也用以指示为上表签名后的三个特殊成员，如果名称不够16字节，剩余的用空格`' '`补齐，如果超过16字节（去除末尾固定的`'/'`只剩15字节），则名称字符串存放到 Longnames Member （长名称成员）里，`Name`字段指示其所在偏移。`Size`表示成员数据大小，不包含成员头自身大小60（`IMAGE_SIZEOF_ARCHIVE_MEMBER_HDR`或`sizeof(IMAGE_ARCHIVE_MEMBER_HEADER)`）字节，也不包含用于对齐的`'\n'`。
     
 + 1st Linker Member 与 2nd Linker Member  
     作用和结构都类似，记录符号的名称和所在文件偏移供链接器定位，信息上是冗余的。前者Unix Style，后者MS Style，并且后者按名称排序使得按名称查找符号更高效，MS链接器（[Link.exe](https://learn.microsoft.com/en-us/cpp/build/reference/linking)）使用。
@@ -283,30 +283,32 @@ EXPORTS
 
 它们分别位于3个不同夹带的Obj里，MS链接器（[Link.exe](https://learn.microsoft.com/en-us/cpp/build/reference/linking)）构造导入表时使用它们。
 
-前二者名称分别为`"__IMPORT_DESCRIPTOR_[Dll名]"`和`"[Dll名]_NULL_THUNK_DATA"`（**注意开头字符为`'\x7F'`**），完全可以放在同个Obj里。如果Lib包含多个Dll的导出符号，它们也要对应地有多个，成员名也是Dll的名称。
+在一个用于链接Dll的Lib里`__NULL_IMPORT_DESCRIPTOR`只需要有1个，所以存放在单独的一个Obj会比较好。成员名无所谓，不用保留名称即可。
 
-在一个用于链接Dll的Lib里`__NULL_IMPORT_DESCRIPTOR`只需要有1个，成员名无所谓，不用保留名称即可。
+前二者名称分别为`"__IMPORT_DESCRIPTOR_[Dll名]"`和`"[Dll名]_NULL_THUNK_DATA"`（**注意开头字符为`'\x7F'`**），可以放在同个Obj里。如果Lib包含多个Dll的导出符号，它们也要对应地有多个，成员名也是Dll的名称。所在Obj需要有`__NULL_IMPORT_DESCRIPTOR`的外部引用记录，否则链接Dll时`__NULL_IMPORT_DESCRIPTOR`可能未被主动引入，导致的PE映像导入表没能以空IID结尾。
 
 与Windows SDK的Lib里的Obj相比，我们可以去除其中的调试符号，也可以简化3个Obj之间的复杂关系。
 
 ### 3. 代码实现
-我的代码实现：[KNSoft/C4Lib - C4Lib/Source/PEImage/DllStub.cs](https://github.com/KNSoft/C4Lib/blob/main/Source/PEImage/DllStub.cs)里。其中：
-1. `MakeNullIIDObjectFile`子函数用于构造`__NULL_IMPORT_DESCRIPTOR`所在Obj
-2. `MakeImportStubObjectFile`子函数用于构造`__IMPORT_DESCRIPTOR_XXX`与`XXX_NULL_THUNK_DATA`所在Obj
-3. `MakeImportStubLibraryFile`是最终实现，输出Lib文件数据流，入参为目标平台类型（`IMAGE_FILE_MACHINE Machine`）及可包含多个Dll导出符号信息的键值对（`List<KeyValuePair<String, List<DllExport>>> DllExports`），后者形如：
-```JSONC
-{
-    "KERNEL32.dll": {
-        { "Type": "IMPORT_OBJECT_TYPE_CODE", "Name": "_CreateProcessInternalW@48", "NameType": "IMPORT_OBJECT_NAME_UNDECORATE" } 
-        // , ...
-    },
-    "SECHOST.dll": {
-        { "Type": "IMPORT_OBJECT_TYPE_CODE", "Name": "_LsaLookupOpenLocalPolicy@12", "NameType": "IMPORT_OBJECT_NAME_UNDECORATE" }
-        // , ...
-    }
-    // , ...
-}
+我的代码实现：
+
+[KNSoft/C4Lib - C4Lib/Source/PEImage/ObjectFile.cs](https://github.com/KNSoft/C4Lib/blob/main/Source/PEImage/ObjectFile.cs)中`NewNullIIDObject`方法用于构造`__NULL_IMPORT_DESCRIPTOR`所在Obj，`NewDllImportStubObject`方法用于构造`__IMPORT_DESCRIPTOR_XXX`与`XXX_NULL_THUNK_DATA`所在Obj。
+
+[KNSoft/C4Lib - C4Lib/Source/PEImage/ArchiveFile.cs](https://github.com/KNSoft/C4Lib/blob/main/Source/PEImage/ArchiveFile.cs)是Lib构造的核心实现，调用`AddImport`方法（包含多个重载）为Lib文件添加Object文件或Dll导出的导入项。
+
+[KNSoft/Precomp4C - Precomp4C/Source/Tasks/DllStubTask.cs](https://github.com/KNSoft/Precomp4C/blob/main/Source/Tasks/DllStubTask.cs)是MSBuild自定义生成任务，调用上述方法，根据输入的XML描述，输出Lib：
+```XML
+<DllStub>
+	<Dll Name="KERNEL32.dll">
+		<Export Name="CreateProcessInternalW" CallConv="__stdcall" Arg="ptr ptr ptr ptr ptr long long ptr ptr ptr ptr ptr" />
+	</Dll>
+	<Dll Name="SECHOST.dll">
+		<Export Name="LsaLookupOpenLocalPolicy" CallConv="__stdcall" Arg="ptr long ptr" />
+        <!-- ... -->
+    </Dll>
+</DllStub>
 ```
+
 使用[7-Zip](https://7-zip.org/)查看产出Lib的1.txt，内容如：
 ```
 KNSoft    __NULL_IMPORT_DESCRIPTOR
